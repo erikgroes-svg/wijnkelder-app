@@ -1,11 +1,7 @@
-// app/add/page.tsx
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
+"use client";
 
-import dynamicImport from "next/dynamic";
-import { Suspense } from "react";
-
-const AddClient = dynamicImport(() => import("./AddClient"), { ssr: false });
+import React, { Suspense } from "react";
+import AddClient from "./AddClient";
 
 export default function AddPage() {
   return (
