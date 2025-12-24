@@ -1,24 +1,13 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-/**
- * Pas deze constanten aan aan jouw Supabase setup.
- * Bucket/paden moeten lowercase blijven (jouw projectregel).
- */
-const BUCKET_NAME = "wines";
+const BUILD_ID = "ADDCLIENT-DEBUG-2025-12-24-01";
+
+// Pas aan indien nodig
+const BUCKET_NAME = "wines-photos";
 const TABLE_NAME = "wines";
-
-/**
- * Als jij al een echte overzichtspagina hebt, zet die hier.
- * Voorlopig laat ik dit leeg zodat we NIET automatisch redirecten.
- * Voorbeelden: "/cellar" of "/wines"
- */
-const OVERVIEW_ROUTE = ""; // bv. "/cellar"
-
-const DRAFT_KEY = "add_wine_draft_v2";
 
 async function downscaleImage(file: File, maxW = 1600, maxH = 1600, quality = 0.82) {
   const bitmap = await createImageBitmap(file);
@@ -46,8 +35,6 @@ async function downscaleImage(file: File, maxW = 1600, maxH = 1600, quality = 0.
 }
 
 export default function AddClient() {
-  const router = useRouter();
-
   const [rawFile, setRawFile] = useState<File | null>(null);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -56,33 +43,32 @@ export default function AddClient() {
   const [saveBusy, setSaveBusy] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
+  const [savedMsg, setSavedMsg] = useState<string | null>(null);
 
-  // Form velden
+  const [status, setStatus] = useState<string>("Idle");
+  const [lastActionTs, setLastActionTs] = useState<string>("");
+
   const [name, setName] = useState("");
   const [producer, setProducer] = useState("");
   const [vintage, setVintage] = useState("");
 
-  // Draft herstellen bij mount
   useEffect(() => {
-    try {
-      const raw = sessionStorage.getItem(DRAFT_KEY);
-      if (!raw) return;
-      const d = JSON.parse(raw);
-      if (typeof d?.name === "string") setName(d.name);
-      if (typeof d?.producer === "string") setProducer(d.producer);
-      if (typeof d?.vintage === "string") setVintage(d.vintage);
-    } catch {}
+    const ts = new Date().toISOString();
+    console.log(`[${BUILD_ID}] mounted at ${ts}`);
+    setLastActionTs(ts);
   }, []);
 
-  // Draft bewaren bij wijziging
+  // Detecteer harde reloads: als dit telkens opnieuw “mounted” logt bij Opslaan,
+  // dan is er effectief een page reload/remount.
   useEffect(() => {
-    try {
-      sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ name, producer, vintage }));
-    } catch {}
-  }, [name, producer, vintage]);
+    const handler = () => {
+      const ts = new Date().toISOString();
+      console.log(`[${BUILD_ID}] beforeunload at ${ts}`);
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, []);
 
-  // Preview URL
   useEffect(() => {
     if (!rawFile) {
       setPreviewUrl(null);
@@ -95,61 +81,50 @@ export default function AddClient() {
 
   async function onPickPhoto(e: React.ChangeEvent<HTMLInputElement>) {
     setError(null);
-    setSaved(false);
+    setSavedMsg(null);
 
     if (photoBusy) return;
 
     const file = e.target.files?.[0] || null;
     if (!file) return;
 
-    // laat toe om opnieuw hetzelfde bestand te selecteren
+    // zodat je dezelfde foto opnieuw kan kiezen
     e.target.value = "";
 
+    setStatus("Foto gekozen — optimaliseren...");
     setRawFile(file);
 
     try {
       setPhotoBusy(true);
       const smaller = await downscaleImage(file);
       setUploadFile(smaller);
+      setStatus("Foto klaar (verkleind) — klaar om op te slaan.");
+      setLastActionTs(new Date().toISOString());
     } catch (err: any) {
       setUploadFile(null);
       setError(err?.message ?? "Foto verwerken mislukt.");
+      setStatus("Fout bij foto verwerking.");
+      setLastActionTs(new Date().toISOString());
     } finally {
       setPhotoBusy(false);
     }
   }
 
-  function resetFormForNext() {
+  async function handleSaveClick() {
     setError(null);
-    setSaved(false);
+    setSavedMsg(null);
 
-    setName("");
-    setProducer("");
-    setVintage("");
-
-    setRawFile(null);
-    setUploadFile(null);
-
-    try {
-      sessionStorage.removeItem(DRAFT_KEY);
-    } catch {}
-  }
-
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setSaved(false);
+    console.log(`[${BUILD_ID}] Save clicked`);
+    setLastActionTs(new Date().toISOString());
 
     if (photoBusy) {
       setError("Wacht even tot de foto verwerkt is.");
       return;
     }
-
     if (!uploadFile) {
       setError("Kies eerst een foto.");
       return;
     }
-
     if (!name.trim()) {
       setError("Vul minstens een naam in.");
       return;
@@ -158,7 +133,7 @@ export default function AddClient() {
     try {
       setSaveBusy(true);
 
-      // 1) Upload foto
+      setStatus("Stap 1/3: Upload naar storage...");
       const fileName = `${crypto.randomUUID()}.jpg`;
       const filePath = `wines/${fileName}`;
 
@@ -172,11 +147,11 @@ export default function AddClient() {
 
       if (uploadErr) throw new Error(`Upload mislukt: ${uploadErr.message}`);
 
-      // 2) Public URL (werkt enkel als bucket public is)
+      setStatus("Stap 2/3: Public URL ophalen...");
       const { data: pub } = supabase.storage.from(BUCKET_NAME).getPublicUrl(filePath);
       const photoUrl = pub?.publicUrl ?? null;
 
-      // 3) Insert DB record (pas kolommen aan als jouw schema anders is)
+      setStatus("Stap 3/3: Record opslaan in database...");
       const payload: any = {
         name: name.trim(),
         producer: producer.trim() || null,
@@ -188,20 +163,14 @@ export default function AddClient() {
       const { error: insertErr } = await supabase.from(TABLE_NAME).insert(payload);
       if (insertErr) throw new Error(`Opslaan mislukt: ${insertErr.message}`);
 
-      // 4) Succes: toon bevestiging, laat gebruiker kiezen wat erna
-      try {
-        sessionStorage.removeItem(DRAFT_KEY);
-      } catch {}
-
-      setSaved(true);
-
-      // We resetten NIET automatisch alles, zodat je nog kan zien wat je net deed.
-      // Als je “Nog een wijn” klikt resetten we wel.
+      setStatus("Klaar: opgeslagen.");
+      setSavedMsg("Opgeslagen. De wijn is toegevoegd.");
+      setLastActionTs(new Date().toISOString());
     } catch (err: any) {
-      setError(err?.message ?? "Opslaan mislukt.");
-      // extra debug voor jezelf in de browser console
-      // (op iPhone zie je dit minder makkelijk, maar op desktop wel)
       console.error(err);
+      setError(err?.message ?? "Opslaan mislukt.");
+      setStatus("Fout bij opslaan.");
+      setLastActionTs(new Date().toISOString());
     } finally {
       setSaveBusy(false);
     }
@@ -209,7 +178,7 @@ export default function AddClient() {
 
   const containerStyle: React.CSSProperties = {
     padding: 16,
-    maxWidth: 520,
+    maxWidth: 720,
     margin: "0 auto",
     boxSizing: "border-box",
   };
@@ -233,7 +202,7 @@ export default function AddClient() {
     fontSize: 16,
   };
 
-  const primaryButton: React.CSSProperties = {
+  const buttonStyle: React.CSSProperties = {
     width: "100%",
     padding: "12px 14px",
     borderRadius: 12,
@@ -246,61 +215,33 @@ export default function AddClient() {
     opacity: saveBusy ? 0.85 : 1,
   };
 
-  const secondaryButton: React.CSSProperties = {
-    width: "100%",
-    padding: "12px 14px",
-    borderRadius: 12,
-    border: "1px solid #111827",
-    background: "white",
-    color: "#111827",
-    fontWeight: 800,
-    boxSizing: "border-box",
-    cursor: "pointer",
-  };
-
   return (
     <main style={containerStyle}>
-      <h1 style={{ fontSize: 20, fontWeight: 900, marginBottom: 10 }}>Wijn toevoegen</h1>
+      <h1 style={{ fontSize: 22, fontWeight: 900, marginBottom: 10 }}>Wijn toevoegen</h1>
 
-      {saved && (
-        <section style={{ ...cardStyle, borderColor: "#16a34a" }}>
-          <div style={{ fontSize: 14, fontWeight: 900, color: "#166534" }}>
-            Opgeslagen.
-          </div>
-          <div style={{ marginTop: 8, fontSize: 13, color: "#111827", lineHeight: 1.45 }}>
-            De wijn is toegevoegd. Wat wil je nu doen?
-          </div>
+      {/* Onmiskenbare versie-indicator */}
+      <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 12 }}>
+        Build: <strong>{BUILD_ID}</strong>
+      </div>
 
-          <div style={{ marginTop: 12 }}>
-            <button type="button" style={secondaryButton} onClick={resetFormForNext}>
-              Nog een wijn toevoegen
-            </button>
-          </div>
+      {/* Statusblok */}
+      <section style={{ ...cardStyle, marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 900, marginBottom: 6 }}>Status</div>
+        <div style={{ fontSize: 13, lineHeight: 1.4 }}>
+          <div><strong>State:</strong> {status}</div>
+          <div><strong>Laatste actie:</strong> {lastActionTs}</div>
+          <div><strong>photoBusy:</strong> {String(photoBusy)} | <strong>saveBusy:</strong> {String(saveBusy)}</div>
+        </div>
+      </section>
 
-          {OVERVIEW_ROUTE ? (
-            <div style={{ marginTop: 10 }}>
-              <button
-                type="button"
-                style={primaryButton}
-                onClick={() => {
-                  router.push(OVERVIEW_ROUTE);
-                  router.refresh();
-                }}
-              >
-                Naar overzicht
-              </button>
-            </div>
-          ) : (
-            <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>
-              Als je een overzichtspagina hebt, zet die route in <strong>OVERVIEW_ROUTE</strong>.
-            </div>
-          )}
+      {savedMsg && (
+        <section style={{ ...cardStyle, borderColor: "#16a34a", marginBottom: 14 }}>
+          <div style={{ fontSize: 14, fontWeight: 900, color: "#166534" }}>{savedMsg}</div>
         </section>
       )}
 
-      <section style={{ ...cardStyle, marginTop: 14 }}>
+      <section style={cardStyle}>
         <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 8 }}>Foto</div>
-
         <input
           type="file"
           accept="image/*"
@@ -308,10 +249,6 @@ export default function AddClient() {
           onChange={onPickPhoto}
           style={{ width: "100%", boxSizing: "border-box" }}
         />
-
-        {photoBusy && (
-          <div style={{ marginTop: 10, fontSize: 14 }}>Foto wordt geoptimaliseerd…</div>
-        )}
 
         {previewUrl && (
           <img
@@ -322,7 +259,7 @@ export default function AddClient() {
         )}
       </section>
 
-      <form onSubmit={onSubmit} style={{ marginTop: 14, ...cardStyle }}>
+      <section style={{ marginTop: 14, ...cardStyle }}>
         <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 8 }}>Details</div>
 
         <div style={labelStyle}>Naam</div>
@@ -347,15 +284,11 @@ export default function AddClient() {
         )}
 
         <div style={{ marginTop: 14 }}>
-          <button type="submit" style={primaryButton} disabled={saveBusy}>
+          <button type="button" style={buttonStyle} onClick={handleSaveClick} disabled={saveBusy}>
             {saveBusy ? "Bezig…" : "Opslaan"}
           </button>
         </div>
-
-        <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280", lineHeight: 1.4 }}>
-          Als Safari herlaadt, blijven je details bewaard.
-        </div>
-      </form>
+      </section>
 
       <div style={{ height: 24 }} />
     </main>

@@ -1,12 +1,8 @@
-"use client";
+// src/app/add/page.tsx
+export const dynamic = "force-dynamic";
 
-import React, { Suspense } from "react";
 import AddClient from "./AddClient";
 
 export default function AddPage() {
-  return (
-    <Suspense fallback={<div style={{ padding: 24 }}>Laden…</div>}>
-      <AddClient />
-    </Suspense>
-  );
+  return <AddClient />;
 }
