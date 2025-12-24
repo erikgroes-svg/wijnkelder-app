@@ -5,14 +5,15 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
 /**
- * Pas deze 2 constanten aan als jouw Supabase namen anders zijn.
- * Bucket en paden moeten lowercase zijn (jouw projectregel).
+ * Pas deze constanten aan aan jouw Supabase setup.
+ * Bucket/paden moeten lowercase blijven (jouw projectregel).
  */
-const BUCKET_NAME = "wines"; // bv. "photos" of "winephotos"
-const TABLE_NAME = "wines"; // bv. "bottles" of "cellar_items"
+const BUCKET_NAME = "wines";
+const TABLE_NAME = "wines";
+const AFTER_SAVE_ROUTE = "/";
 
-// Waar wil je na "Opslaan" naartoe?
-const AFTER_SAVE_ROUTE = "/"; // bv. "/cellar" of "/wines"
+// Key om form-data te bewaren tijdens iOS/Safari refresh/remount
+const DRAFT_KEY = "add_wine_draft_v1";
 
 async function downscaleImage(file: File, maxW = 1600, maxH = 1600, quality = 0.82) {
   const bitmap = await createImageBitmap(file);
@@ -46,7 +47,10 @@ export default function AddClient() {
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
-  const [busy, setBusy] = useState(false);
+  // Split busy: foto-verwerking vs opslaan
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+
   const [error, setError] = useState<string | null>(null);
 
   // Form velden
@@ -54,7 +58,33 @@ export default function AddClient() {
   const [producer, setProducer] = useState("");
   const [vintage, setVintage] = useState("");
 
-  // Object URL cleanup (iPhone vriendelijk)
+  // 1) Herstel draft bij mount (iOS Safari kan remounten)
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(DRAFT_KEY);
+      if (!raw) return;
+      const d = JSON.parse(raw);
+      if (typeof d?.name === "string") setName(d.name);
+      if (typeof d?.producer === "string") setProducer(d.producer);
+      if (typeof d?.vintage === "string") setVintage(d.vintage);
+    } catch {
+      // negeren
+    }
+  }, []);
+
+  // 2) Bewaar draft bij wijziging
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(
+        DRAFT_KEY,
+        JSON.stringify({ name, producer, vintage })
+      );
+    } catch {
+      // negeren
+    }
+  }, [name, producer, vintage]);
+
+  // 3) Object URL preview + cleanup
   useEffect(() => {
     if (!rawFile) {
       setPreviewUrl(null);
@@ -67,20 +97,28 @@ export default function AddClient() {
 
   async function onPickPhoto(e: React.ChangeEvent<HTMLInputElement>) {
     setError(null);
+
+    // iOS kan soms twee keer onChange afvuren; guard.
+    if (photoBusy) return;
+
     const file = e.target.files?.[0] || null;
     if (!file) return;
+
+    // Belangrijk: maak het mogelijk om dezelfde foto opnieuw te kiezen
+    // zonder dat Safari vast blijft hangen in "zelfde bestand" toestand.
+    e.target.value = "";
 
     setRawFile(file);
 
     try {
-      setBusy(true);
+      setPhotoBusy(true);
       const smaller = await downscaleImage(file);
       setUploadFile(smaller);
     } catch (err: any) {
       setUploadFile(null);
       setError(err?.message ?? "Foto verwerken mislukt.");
     } finally {
-      setBusy(false);
+      setPhotoBusy(false);
     }
   }
 
@@ -88,23 +126,27 @@ export default function AddClient() {
     e.preventDefault();
     setError(null);
 
+    if (photoBusy) {
+      setError("Wacht even tot de foto verwerkt is.");
+      return;
+    }
+
     if (!uploadFile) {
       setError("Kies eerst een foto.");
       return;
     }
 
-    // Eenvoudige validatie
     if (!name.trim()) {
       setError("Vul minstens een naam in.");
       return;
     }
 
     try {
-      setBusy(true);
+      setSaveBusy(true);
 
-      // 1) Upload foto naar Supabase Storage
+      // Upload foto
       const fileName = `${crypto.randomUUID()}.jpg`;
-      const filePath = `wines/${fileName}`; // lowercase pad
+      const filePath = `wines/${fileName}`;
 
       const { error: uploadErr } = await supabase.storage
         .from(BUCKET_NAME)
@@ -116,12 +158,10 @@ export default function AddClient() {
 
       if (uploadErr) throw new Error(`Upload mislukt: ${uploadErr.message}`);
 
-      // 2) Public URL (werkt enkel als bucket public is)
+      // Public URL (enkel als bucket public is)
       const { data: pub } = supabase.storage.from(BUCKET_NAME).getPublicUrl(filePath);
       const photoUrl = pub?.publicUrl ?? null;
 
-      // 3) Insert record in DB
-      // Let op: TABLE_NAME + kolommen moeten bestaan in jouw schema.
       const payload: any = {
         name: name.trim(),
         producer: producer.trim() || null,
@@ -133,131 +173,7 @@ export default function AddClient() {
       const { error: insertErr } = await supabase.from(TABLE_NAME).insert(payload);
       if (insertErr) throw new Error(`Opslaan mislukt: ${insertErr.message}`);
 
-      // 4) Reset en redirect
-      setName("");
-      setProducer("");
-      setVintage("");
-      setRawFile(null);
-      setUploadFile(null);
-
-      router.push(AFTER_SAVE_ROUTE);
-      router.refresh();
-    } catch (err: any) {
-      setError(err?.message ?? "Opslaan mislukt.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const containerStyle: React.CSSProperties = {
-    padding: 16,
-    maxWidth: 520,
-    margin: "0 auto",
-    boxSizing: "border-box",
-  };
-
-  const cardStyle: React.CSSProperties = {
-    border: "1px solid #e5e7eb",
-    borderRadius: 14,
-    padding: 14,
-    boxSizing: "border-box",
-    background: "white",
-  };
-
-  const labelStyle: React.CSSProperties = { fontSize: 13, fontWeight: 700, marginTop: 12 };
-  const inputStyle: React.CSSProperties = {
-    width: "100%",
-    maxWidth: "100%",
-    padding: "10px 12px",
-    borderRadius: 10,
-    border: "1px solid #d1d5db",
-    boxSizing: "border-box",
-    fontSize: 16, // iOS: voorkomt zoom bij focus
-  };
-
-  const buttonStyle: React.CSSProperties = {
-    width: "100%",
-    padding: "12px 14px",
-    borderRadius: 12,
-    border: "1px solid #111827",
-    background: busy ? "#374151" : "#111827",
-    color: "white",
-    fontWeight: 800,
-    boxSizing: "border-box",
-    cursor: busy ? "not-allowed" : "pointer",
-    opacity: busy ? 0.85 : 1,
-  };
-
-  return (
-    <main style={containerStyle}>
-      <h1 style={{ fontSize: 20, fontWeight: 900, marginBottom: 10 }}>Wijn toevoegen</h1>
-
-      <section style={cardStyle}>
-        <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 8 }}>Foto</div>
-
-        <input
-          type="file"
-          accept="image/*"
-          capture="environment"
-          onChange={onPickPhoto}
-          style={{ width: "100%", boxSizing: "border-box" }}
-          disabled={busy}
-        />
-
-        {busy && (
-          <div style={{ marginTop: 10, fontSize: 14 }}>Foto wordt geoptimaliseerd…</div>
-        )}
-
-        {previewUrl && (
-          <img
-            src={previewUrl}
-            alt="Preview"
-            style={{
-              width: "100%",
-              marginTop: 10,
-              borderRadius: 12,
-              display: "block",
-            }}
-          />
-        )}
-      </section>
-
-      <form onSubmit={onSubmit} style={{ marginTop: 14, ...cardStyle }}>
-        <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 8 }}>Details</div>
-
-        <div style={labelStyle}>Naam</div>
-        <input value={name} onChange={(e) => setName(e.target.value)} style={inputStyle} />
-
-        <div style={labelStyle}>Producent</div>
-        <input value={producer} onChange={(e) => setProducer(e.target.value)} style={inputStyle} />
-
-        <div style={labelStyle}>Jaargang</div>
-        <input
-          value={vintage}
-          onChange={(e) => setVintage(e.target.value)}
-          inputMode="numeric"
-          pattern="\d*"
-          style={inputStyle}
-        />
-
-        {error && (
-          <div style={{ marginTop: 12, fontSize: 14, color: "#b91c1c", fontWeight: 700 }}>
-            {error}
-          </div>
-        )}
-
-        <div style={{ marginTop: 14 }}>
-          <button type="submit" style={buttonStyle} disabled={busy}>
-            {busy ? "Bezig…" : "Opslaan"}
-          </button>
-        </div>
-
-        <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280", lineHeight: 1.4 }}>
-          Na opslaan ga je automatisch terug naar: <strong>{AFTER_SAVE_ROUTE}</strong>
-        </div>
-      </form>
-
-      <div style={{ height: 24 }} />
-    </main>
-  );
-}
+      // Succes: draft wissen + reset + redirect
+      try {
+        sessionStorage.removeItem(DRAFT_KEY);
+      }
